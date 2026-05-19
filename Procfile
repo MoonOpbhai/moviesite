@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    startCommand:web: waitress-serve --listen=0.0.0.0:$PORT app:app
     envVars:
       - key: NODE_ENV
         value: production
