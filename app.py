@@ -51,10 +51,24 @@ def detect_size(text):
     return m.group(1).strip() if m else 'N/A'
 
 
-def get_label(a):
-    """Get quality + size from next sibling or parent"""
+def find_row_container(a):
+    """Find the row/container element that groups the link with its quality/size label"""
+    # Walk up to find a row-like element (div, li, tr, p with multiple children)
+    parent = a.parent
+    for _ in range(8):
+        if not parent: break
+        # Check if this parent has siblings that look like quality labels
+        if parent.name in ('div', 'li', 'tr', 'p', 'span'):
+            return parent
+        parent = parent.parent
+    return a.parent  # fallback
+
+
+def get_quality_size(a):
+    """Find quality + size by searching the row container and nearby elements"""
     q, s = 'N/A', 'N/A'
-    # Check next sibling (format: "2160p 4K · 4.2GB")
+    
+    # Method 1: Check next sibling elements
     nxt = a.next_sibling
     for _ in range(5):
         if not nxt: break
@@ -62,10 +76,62 @@ def get_label(a):
             txt = nxt.get_text(strip=True)
             if txt and ('p' in txt or 'GB' in txt or 'MB' in txt):
                 parts = re.split(r'\s*[·|–-]\s*', txt)
-                q = parts[0].strip()
-                s = parts[1].strip() if len(parts) > 1 else 'N/A'
-                break
+                q_candidate = parts[0].strip()
+                s_candidate = parts[1].strip() if len(parts) > 1 else ''
+                if detect_quality(q_candidate) != 'N/A':
+                    q = q_candidate
+                    s = detect_size(s_candidate) if detect_size(s_candidate) != 'N/A' else s_candidate
+                    return q, s
         nxt = nxt.next_sibling
+    
+    # Method 2: Search in parent container + next siblings of parent
+    container = find_row_container(a)
+    if container:
+        # Check all text in this container for quality/size patterns
+        container_text = container.get_text(strip=True)
+        q = detect_quality(container_text)
+        s = detect_size(container_text)
+        
+        # Method 3: Check next sibling of the container
+        if q == 'N/A':
+            container_next = container.next_sibling
+            for _ in range(5):
+                if not container_next: break
+                if hasattr(container_next, 'get_text'):
+                    txt = container_next.get_text(strip=True)
+                    if 'p' in txt or 'GB' in txt or 'MB' in txt:
+                        q = detect_quality(txt)
+                        s = detect_size(txt)
+                        if q != 'N/A' or s != 'N/A':
+                            break
+                container_next = container_next.next_sibling
+        
+        # Method 4: Check previous sibling (quality label might be before link)
+        if q == 'N/A':
+            container_prev = container.previous_sibling
+            for _ in range(5):
+                if not container_prev: break
+                if hasattr(container_prev, 'get_text'):
+                    txt = container_prev.get_text(strip=True)
+                    if 'p' in txt or 'GB' in txt or 'MB' in txt:
+                        q = detect_quality(txt)
+                        s = detect_size(txt)
+                        if q != 'N/A' or s != 'N/A':
+                            break
+                container_prev = container_prev.previous_sibling
+    
+    # Method 5: Walk up parents looking for quality/size
+    if q == 'N/A':
+        parent = a.parent
+        for _ in range(6):
+            if not parent: break
+            full_text = parent.get_text(strip=True)
+            q = detect_quality(full_text)
+            if q != 'N/A':
+                s = detect_size(full_text)
+                break
+            parent = parent.parent
+    
     return q, s
 
 
@@ -168,31 +234,26 @@ def details():
             for a in pg.find_all('a', href=True):
                 href = a['href']
                 if href in seen_urls: continue
-                txt_lower = a.get_text(strip=True).lower()
+                txt = a.get_text(strip=True)
+                txt_lower = txt.lower()
                 href_lower = href.lower()
                 
-                # Skip suggestions and non-download links
-                if not href or href == '#' or href == '/':
-                    continue
-                if re.match(r'^\d+[mgt]b$', txt_lower.strip()):
-                    continue
-                patterns = ['how to download', 'download links', 'watch online', 'trailer', 'teaser']
-                if any(p in txt_lower or p in href_lower for p in patterns):
-                    continue
-                if any(x in txt_lower for x in ['300mb movies','500mb movies','700mb movies','900mb movies','1gb movies']):
-                    continue
-                
-                # Only real download links
-                good_domains = ['fastdlserver.site', 'drive.google', 'mega.nz', 'mediafire', 'zippyshare', 'upload.ee', '.mkv', '.mp4', '.rar', '.zip', '.avi']
-                if not any(d in href_lower for d in good_domains):
+                # Skip only obvious non-download links
+                if (not href or href in ('#', '/') or
+                    'how to download' in txt_lower or
+                    'watch online' in txt_lower or
+                    ('300mb' in href_lower and 'movies' in href_lower) or
+                    ('500mb' in href_lower and 'movies' in href_lower) or
+                    ('700mb' in href_lower and 'movies' in href_lower) or
+                    ('900mb' in href_lower and 'movies' in href_lower) or
+                    '1gb movies' in href_lower):
                     continue
                 
-                # Quality + size
-                q, s = get_label(a)
+                # Get quality + size
+                q, s = get_quality_size(a)
                 
                 # Filename
-                link_text = a.get_text(strip=True)
-                filename = f"{movie_name} - {link_text}" if movie_name else link_text
+                filename = f"{movie_name} - {txt}" if movie_name else txt
                 if not filename.lower().endswith(('.mkv', '.mp4', '.avi', '.zip', '.rar', '.mk')):
                     filename += ' [BollyFlix].mkv'
                 
@@ -210,7 +271,7 @@ def details():
                     if href in seen_urls: continue
                     seen_urls.add(href)
                     ep = re.search(r'Episode\s*(\d+)', txt, re.I)
-                    q, s = get_label(a)
+                    q, s = get_quality_size(a)
                     downloads.append({'name': txt or 'Unknown', 'episode': int(ep.group(1)) if ep else 0, 'quality': q, 'url': href, 'size': s})
     except Exception as e:
         log.error(f'Details error [{src}]: {e}')
@@ -251,3 +312,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     log.info(f'Starting on port {port}')
     app.run(host='0.0.0.0', port=port)
+    
