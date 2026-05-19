@@ -14,7 +14,7 @@ HEADERS = {
     'Accept-Language': 'en-US,en;q=0.5',
 }
 
-BASE_BF = 'https://new.bollyflix.gd'
+BASE_BF = 'new.bollyflix.gd'
 BASE_AF = 'https://animeflix.dad'
 TMDB_KEY = os.environ.get('TMDB_API_KEY', '')
 TMDB_BASE = 'https://api.themoviedb.org/3'
@@ -92,6 +92,93 @@ def quality_label(tag):
 
 def size_label(tag):
     return detect_size_from_parent(tag)
+
+
+def is_suggestion_link(a_tag, text):
+    """
+    Returns True if this link is a suggestion/category/label, NOT an actual download link.
+    Filters out: How To Download, 300MB MOVIES, similar category boxes.
+    """
+    txt = (text or a_tag.get_text(strip=True)).lower()
+    href = a_tag.get('href', '').lower()
+    
+    # Skip "how to download" type suggestions
+    suggestion_patterns = [
+        'how to download',
+        'download links',      # The category label row
+        '300mb movies',
+        '500mb movies',
+        '700mb movies',
+        '900mb movies',
+        '1gb movies',
+        '1.5gb movies',
+        '2gb movies',
+        'short movies',
+        'web series',
+        'webseries',
+        'watch online',
+        'trailer',
+        'teaser',
+    ]
+    
+    for pattern in suggestion_patterns:
+        if pattern in txt or pattern in href:
+            return True
+    
+    # Pure number+MB/GB without a real filename = likely a suggestion label
+    if re.match(r'^\d+[mgt]b$', txt.strip()):
+        return True
+    
+    # Links pointing to same page or home = suggestion
+    if not href or href.startswith('#') or href in ('/', '#', ''):
+        return True
+    
+    return False
+
+
+def is_actual_download_link(a_tag, text):
+    """
+    Returns True if this is a real download link.
+    Checks: fastdlserver, drive.google, direct video hosts.
+    """
+    href = a_tag.get('href', '').lower()
+    txt = (text or a_tag.get_text(strip=True)).lower()
+    
+    actual_domains = [
+        'fastdlserver.site',
+        'drive.google.com',
+        'drive.google.co.in',
+        'mega.nz',
+        'mediafire.com',
+        'zippyshare.com',
+        'upload.ee',
+        'openload.co',
+        'streamtape.com',
+        'mixdrop.co',
+        'mp4upload.com',
+        'bdupload.asia',
+        'uploadbaz.com',
+    ]
+    
+    for domain in actual_domains:
+        if domain in href:
+            return True
+    
+    # Links with 'download' in text that also have file extension in text
+    if 'download' in txt or 'fastdl' in href:
+        # Make sure it's not "Download Links" as a category
+        if 'download links' in txt:
+            return False
+        # Check if the link text looks like a real file URL
+        if any(ext in txt for ext in ['.mkv', '.mp4', '.avi', '.rar', '.zip']):
+            return True
+        if any(ext in href for ext in ['.mkv', '.mp4', '.avi', '.rar', '.zip']):
+            return True
+        # If href has actual file-like content
+        if re.search(r'/file|/dl|/download|fileid=', href):
+            return True
+    
+    return False
 
 
 def tmdb_search(query):
@@ -184,26 +271,69 @@ def details():
     try:
         pg = soup(url)
         page_title = pg.title.string if pg.title else ''
+        movie_name = re.sub(r'\s*\[BollyFlix\].*', '', page_title).strip()
+        
         if src == 'BollyFlix':
             title_el = pg.select_one('h1.entry-title')
             title = title_el.get_text(strip=True) if title_el else page_title or ''
             seen_urls = set()
             for a in pg.find_all('a', href=True):
                 href = a['href']
-                txt  = a.get_text(strip=True)
-                is_dl = ('fastdlserver.site' in href or
-                         'drive.google' in href or
-                         'download' in txt.lower() or
-                         'gb' in txt.lower() or
-                         'mb' in txt.lower() or
-                         'fastdl' in href)
-                if not is_dl: continue
                 if href in seen_urls: continue
+                
+                link_text = a.get_text(strip=True)
+                
+                # ===== FILTER OUT SUGGESTIONS =====
+                txt_lower = link_text.lower()
+                # Skip empty links
+                if not txt_lower or not href or href == '#':
+                    continue
+                # Skip suggestion links
+                if is_suggestion_link(a, link_text):
+                    continue
+                # Must be an actual download link
+                if not is_actual_download_link(a, link_text):
+                    continue
+                # ===================================
+                
+                q, s = 'N/A', 'N/A'
+                label_el = None
+                nxt = a.next_sibling
+                for _ in range(5):
+                    if not nxt: break
+                    if hasattr(nxt, 'get_text'):
+                        txt = nxt.get_text(strip=True)
+                        if txt and ('p' in txt or 'K' in txt or 'GB' in txt or 'MB' in txt):
+                            label_el = txt
+                            break
+                    nxt = nxt.next_sibling
+                
+                if label_el:
+                    parts = re.split(r'\s*[·|–-]\s*', label_el)
+                    q = parts[0].strip()
+                    s = parts[1].strip() if len(parts) > 1 else 'N/A'
+                
+                if q == 'N/A':
+                    parent = a.parent
+                    for _ in range(6):
+                        if not parent: break
+                        full_text = parent.get_text(strip=True)
+                        q = detect_quality_from_text(full_text)
+                        if q != 'N/A': break
+                        parent = parent.parent
+                
+                filename = f"{movie_name} - {link_text}" if movie_name else link_text
+                if not filename.lower().endswith(('.mkv', '.mp4', '.avi', '.zip', '.rar')):
+                    filename += ' [BollyFlix].mkv'
+                
+                downloads.append({
+                    'name': filename,
+                    'size': s,
+                    'quality': q,
+                    'url': href
+                })
                 seen_urls.add(href)
-                q = detect_quality_label(a)
-                s = size_label(a)
-                name = txt or a.get('title', '') or 'Download'
-                downloads.append({'name': name, 'size': s, 'quality': q, 'url': href})
+                
         elif src == 'AnimeFlix':
             title_el = pg.select_one('h1.entry-title')
             title = title_el.get_text(strip=True) if title_el else page_title or ''
@@ -221,7 +351,7 @@ def details():
         log.error(f'Details error [{src}]: {e}')
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    return jsonify({'title': title, 'downloads': downloads})
+    return jsonify({'title': page_title or movie_name, 'downloads': downloads})
 
 
 @app.route('/debug')
