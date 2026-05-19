@@ -25,7 +25,12 @@ def get(url, timeout=15):
     r.raise_for_status()
     return r.text
 
-def soup(url): return BeautifulSoup(get(url), 'lxml')
+# Pehle:
+return BeautifulSoup(get(url), 'lxml')
+
+# Ab:
+return BeautifulSoup(get(url), 'html.parser')
+
 
 def quality_label(text):
     t = str(text).lower()
