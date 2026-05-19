@@ -34,9 +34,9 @@ def soup(url):
     return BeautifulSoup(get(url), 'html.parser')
 
 
-def detect_quality_from_text(text):
+def detect_quality(text):
     if not text: return 'N/A'
-    t = str(text).lower()
+    t = text.lower()
     if '2160' in t or '4k' in t: return '2160p 4K'
     if '1080' in t: return '1080p'
     if '720' in t: return '720p'
@@ -45,140 +45,28 @@ def detect_quality_from_text(text):
     return 'N/A'
 
 
-def detect_quality_label(tag):
-    quality_sources = []
-    quality_sources.append(tag.get_text(strip=True))
-    parent = tag.parent
+def detect_size(text):
+    if not text: return 'N/A'
+    m = re.search(r'(\d+\.?\d*\s*[MgtbGBMB]+)', text, re.I)
+    return m.group(1).strip() if m else 'N/A'
+
+
+def get_label(a):
+    """Get quality + size from next sibling or parent"""
+    q, s = 'N/A', 'N/A'
+    # Check next sibling (format: "2160p 4K · 4.2GB")
+    nxt = a.next_sibling
     for _ in range(5):
-        if not parent: break
-        quality_sources.append(parent.get_text(strip=True))
-        parent = parent.parent
-    sibling = tag.next_sibling
-    for _ in range(3):
-        if not sibling: break
-        if hasattr(sibling, 'get_text'):
-            quality_sources.append(sibling.get_text(strip=True))
-        sibling = sibling.next_sibling
-    for text in quality_sources:
-        q = detect_quality_from_text(text)
-        if q != 'N/A':
-            return q
-    return 'N/A'
-
-
-def detect_size_from_parent(tag):
-    parent = tag.parent
-    for _ in range(6):
-        if not parent: break
-        text = parent.get_text(strip=True)
-        m = re.search(r'(\d+\.?\d*\s*[MGT]B)', text, re.I)
-        if m:
-            return m.group(1).strip()
-        sib = parent.next_sibling
-        for _ in range(3):
-            if not sib: break
-            if hasattr(sib, 'get_text'):
-                sib_text = sib.get_text(strip=True)
-                m2 = re.search(r'(\d+\.?\d*\s*[MGT]B)', sib_text, re.I)
-                if m2: return m2.group(1).strip()
-            sib = sib.next_sibling
-        parent = parent.parent
-    return 'N/A'
-
-
-def quality_label(tag):
-    return detect_quality_label(tag)
-
-
-def size_label(tag):
-    return detect_size_from_parent(tag)
-
-
-def is_suggestion_link(a_tag, text):
-    """
-    Returns True if this link is a suggestion/category/label, NOT an actual download link.
-    Filters out: How To Download, 300MB MOVIES, similar category boxes.
-    """
-    txt = (text or a_tag.get_text(strip=True)).lower()
-    href = a_tag.get('href', '').lower()
-    
-    # Skip "how to download" type suggestions
-    suggestion_patterns = [
-        'how to download',
-        'download links',      # The category label row
-        '300mb movies',
-        '500mb movies',
-        '700mb movies',
-        '900mb movies',
-        '1gb movies',
-        '1.5gb movies',
-        '2gb movies',
-        'short movies',
-        'web series',
-        'webseries',
-        'watch online',
-        'trailer',
-        'teaser',
-    ]
-    
-    for pattern in suggestion_patterns:
-        if pattern in txt or pattern in href:
-            return True
-    
-    # Pure number+MB/GB without a real filename = likely a suggestion label
-    if re.match(r'^\d+[mgt]b$', txt.strip()):
-        return True
-    
-    # Links pointing to same page or home = suggestion
-    if not href or href.startswith('#') or href in ('/', '#', ''):
-        return True
-    
-    return False
-
-
-def is_actual_download_link(a_tag, text):
-    """
-    Returns True if this is a real download link.
-    Checks: fastdlserver, drive.google, direct video hosts.
-    """
-    href = a_tag.get('href', '').lower()
-    txt = (text or a_tag.get_text(strip=True)).lower()
-    
-    actual_domains = [
-        'fastdlserver.site',
-        'drive.google.com',
-        'drive.google.co.in',
-        'mega.nz',
-        'mediafire.com',
-        'zippyshare.com',
-        'upload.ee',
-        'openload.co',
-        'streamtape.com',
-        'mixdrop.co',
-        'mp4upload.com',
-        'bdupload.asia',
-        'uploadbaz.com',
-    ]
-    
-    for domain in actual_domains:
-        if domain in href:
-            return True
-    
-    # Links with 'download' in text that also have file extension in text
-    if 'download' in txt or 'fastdl' in href:
-        # Make sure it's not "Download Links" as a category
-        if 'download links' in txt:
-            return False
-        # Check if the link text looks like a real file URL
-        if any(ext in txt for ext in ['.mkv', '.mp4', '.avi', '.rar', '.zip']):
-            return True
-        if any(ext in href for ext in ['.mkv', '.mp4', '.avi', '.rar', '.zip']):
-            return True
-        # If href has actual file-like content
-        if re.search(r'/file|/dl|/download|fileid=', href):
-            return True
-    
-    return False
+        if not nxt: break
+        if hasattr(nxt, 'get_text'):
+            txt = nxt.get_text(strip=True)
+            if txt and ('p' in txt or 'GB' in txt or 'MB' in txt):
+                parts = re.split(r'\s*[·|–-]\s*', txt)
+                q = parts[0].strip()
+                s = parts[1].strip() if len(parts) > 1 else 'N/A'
+                break
+        nxt = nxt.next_sibling
+    return q, s
 
 
 def tmdb_search(query):
@@ -223,14 +111,14 @@ def search():
     if not q: return jsonify([])
     results = []
     try:
-        pg = soup(f"{BASE_BF}/?s={quote(q)}")
+        pg = soup(f"https://{BASE_BF}/?s={quote(q)}")
         for art in pg.select('article')[:30]:
             a = art.select_one('h2 a, h3 a')
             if not a: continue
             href, title = a['href'], a.get_text(strip=True)
             img = art.select_one('img')['src'] if art.select_one('img') else ''
             meta = art.select_one('.entry-meta')
-            quality = detect_quality_from_text(f"{title} {meta.get_text(strip=True) if meta else ''}")
+            quality = detect_quality(f"{title} {meta.get_text(strip=True) if meta else ''}")
             results.append({'title': title, 'href': href, 'img': img, 'meta': meta.get_text(strip=True) if meta else '', 'source': 'BollyFlix', 'quality': quality})
     except Exception as e:
         log.warning(f'BollyFlix search error: {e}')
@@ -280,58 +168,35 @@ def details():
             for a in pg.find_all('a', href=True):
                 href = a['href']
                 if href in seen_urls: continue
+                txt_lower = a.get_text(strip=True).lower()
+                href_lower = href.lower()
                 
+                # Skip suggestions and non-download links
+                if not href or href == '#' or href == '/':
+                    continue
+                if re.match(r'^\d+[mgt]b$', txt_lower.strip()):
+                    continue
+                patterns = ['how to download', 'download links', 'watch online', 'trailer', 'teaser']
+                if any(p in txt_lower or p in href_lower for p in patterns):
+                    continue
+                if any(x in txt_lower for x in ['300mb movies','500mb movies','700mb movies','900mb movies','1gb movies']):
+                    continue
+                
+                # Only real download links
+                good_domains = ['fastdlserver.site', 'drive.google', 'mega.nz', 'mediafire', 'zippyshare', 'upload.ee', '.mkv', '.mp4', '.rar', '.zip', '.avi']
+                if not any(d in href_lower for d in good_domains):
+                    continue
+                
+                # Quality + size
+                q, s = get_label(a)
+                
+                # Filename
                 link_text = a.get_text(strip=True)
-                
-                # ===== FILTER OUT SUGGESTIONS =====
-                txt_lower = link_text.lower()
-                # Skip empty links
-                if not txt_lower or not href or href == '#':
-                    continue
-                # Skip suggestion links
-                if is_suggestion_link(a, link_text):
-                    continue
-                # Must be an actual download link
-                if not is_actual_download_link(a, link_text):
-                    continue
-                # ===================================
-                
-                q, s = 'N/A', 'N/A'
-                label_el = None
-                nxt = a.next_sibling
-                for _ in range(5):
-                    if not nxt: break
-                    if hasattr(nxt, 'get_text'):
-                        txt = nxt.get_text(strip=True)
-                        if txt and ('p' in txt or 'K' in txt or 'GB' in txt or 'MB' in txt):
-                            label_el = txt
-                            break
-                    nxt = nxt.next_sibling
-                
-                if label_el:
-                    parts = re.split(r'\s*[·|–-]\s*', label_el)
-                    q = parts[0].strip()
-                    s = parts[1].strip() if len(parts) > 1 else 'N/A'
-                
-                if q == 'N/A':
-                    parent = a.parent
-                    for _ in range(6):
-                        if not parent: break
-                        full_text = parent.get_text(strip=True)
-                        q = detect_quality_from_text(full_text)
-                        if q != 'N/A': break
-                        parent = parent.parent
-                
                 filename = f"{movie_name} - {link_text}" if movie_name else link_text
-                if not filename.lower().endswith(('.mkv', '.mp4', '.avi', '.zip', '.rar')):
+                if not filename.lower().endswith(('.mkv', '.mp4', '.avi', '.zip', '.rar', '.mk')):
                     filename += ' [BollyFlix].mkv'
                 
-                downloads.append({
-                    'name': filename,
-                    'size': s,
-                    'quality': q,
-                    'url': href
-                })
+                downloads.append({'name': filename, 'size': s, 'quality': q, 'url': href})
                 seen_urls.add(href)
                 
         elif src == 'AnimeFlix':
@@ -345,8 +210,8 @@ def details():
                     if href in seen_urls: continue
                     seen_urls.add(href)
                     ep = re.search(r'Episode\s*(\d+)', txt, re.I)
-                    q = detect_quality_label(a)
-                    downloads.append({'name': txt or 'Unknown', 'episode': int(ep.group(1)) if ep else 0, 'quality': q, 'url': href, 'size': size_label(a)})
+                    q, s = get_label(a)
+                    downloads.append({'name': txt or 'Unknown', 'episode': int(ep.group(1)) if ep else 0, 'quality': q, 'url': href, 'size': s})
     except Exception as e:
         log.error(f'Details error [{src}]: {e}')
         traceback.print_exc()
