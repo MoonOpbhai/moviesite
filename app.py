@@ -91,16 +91,7 @@ def search():
             meta = art.select_one('.entry-meta')
             results.append({'title': title, 'href': href, 'img': img, 'meta': meta.get_text(strip=True) if meta else '', 'source': 'BollyFlix'})
     except Exception: pass
-    try:
-        if t == 'anime':
-            pg = soup(f"{BASE_AF}/?s={quote(q)}")
-            for art in pg.select('article')[:30]:
-                a = art.select_one('h2 a, h3 a')
-                if not a or 'animeflix.dad' not in a.get('href', ''): continue
-                href, title = a['href'], a.get_text(strip=True)
-                img = art.select_one('img')['src'] if art.select_one('img') else ''
-                results.append({'title': title, 'href': href, 'img': img, 'meta': '', 'source': 'AnimeFlix'})
-    except Exception: pass
+
     return jsonify(results)
 
 
@@ -132,6 +123,8 @@ def details():
             for a in pg.find_all('a', href=True):
                 href = a['href']
                 txt  = a.get_text(strip=True)
+                # Skip "How To Download" and similar useless links
+                if any(x in txt.lower() for x in ['how to', 'howto', 'tutorial', 'how-to']): continue
                 if ('fastdlserver.site' in href or 'drive.google' in href or 'download' in txt.lower()):
                     dl = {'name': txt, 'size': 'N/A', 'quality': quality_label(txt), 'url': href}
                     parent = a.parent
@@ -140,76 +133,6 @@ def details():
                         if nxt:
                             dl['size'] = nxt.get_text(strip=True).strip('[]') if hasattr(nxt,'get_text') else str(nxt).strip('[]')
                     downloads.append(dl)
-        elif src == 'AnimeFlix':
-            title_el = pg.select_one('h1.entry-title')
-            title = title_el.get_text(strip=True) if title_el else ''
-            # Step 1: Find all archives links on the article page
-            archives = []
-            for a in pg.find_all('a', href=True):
-                href = a['href']
-                txt  = a.get_text(strip=True)
-                if 'episodes.animeflix.dad/archives/' in href:
-                    archives.append({'url': href, 'name': txt.strip() or 'Gdrive + Mirrors'})
-            # Step 2: Follow each archives link to get the actual getlink URLs
-            if archives:
-                for arc in archives:
-                    try:
-                        arc_pg = soup(arc['url'])
-                        for ga in arc_pg.find_all('a', href=True):
-                            ghref = ga['href']
-                            if 'getlink' in ghref:
-                                # Follow getlink to find final download URL
-                                try:
-                                    dr = get(ghref, timeout=20)
-                                    final_url = None
-                                    # Step A: Look for JS redirect to /file/{id}
-                                    # Pattern: window.location.replace("/file/XXXX")
-                                    js_match = re.search(r"window\.location\.replace\(['\"](/file/[^'\"]+)['\"]", dr)
-                                    if js_match:
-                                        file_path = js_match.group(1)
-                                        try:
-                                            file_resp = get('https://driveseed.org' + file_path, timeout=15)
-                                            # Look for cdn.video-plex.xyz link on file page
-                                            plex_match = re.search(r'https://cdn\.video-plex\.xyz[^\s"\']+', file_resp)
-                                            if plex_match:
-                                                final_url = plex_match.group(0).strip().rstrip('"').rstrip("'")
-                                        except:
-                                            pass
-                                    # Step B: Direct cdn.video-plex.xyz on the page
-                                    if not final_url:
-                                        plex_match = re.search(r'https://cdn\.video-plex\.xyz[^\s"\']+', dr)
-                                        if plex_match:
-                                            final_url = plex_match.group(0).strip().rstrip('"').rstrip("'")
-                                    # Step C: Fallback — cdn.video-gen.xyz (legacy)
-                                    if not final_url:
-                                        gen_match = re.search(r'https://cdn\.video-gen\.xyz[^\s"\']+', dr)
-                                        if gen_match:
-                                            final_url = gen_match.group(0).strip().rstrip('"').rstrip("'")
-                                    # Step D: Fallback — driveseed file page
-                                    if not final_url:
-                                        file_match = re.search(r'driveseed\.org/file/[^\s"\']+', dr)
-                                        if file_match:
-                                            final_url = 'https://' + file_match.group(0).strip().rstrip('"').rstrip("'")
-                                    ql = quality_label(arc['name'] + ' ' + title)
-                                    if final_url:
-                                        downloads.append({
-                                            'name': f"{arc['name']}",
-                                            'url': final_url,
-                                            'quality': ql,
-                                            'size': 'N/A'
-                                        })
-                                except:
-                                    pass
-                    except:
-                        pass
-            # Step 3: Fallback — if no archives found, try old pattern (direct getlink on page)
-            if not downloads:
-                for a in pg.find_all('a', href=True):
-                    href = a['href']
-                    txt  = a.get_text(strip=True)
-                    if 'getlink' in href:
-                        ep = re.search(r'Episode\s*(\d+)', txt, re.I)
-                        downloads.append({'name': txt or 'Unknown', 'episode': int(ep.group(1)) if ep else 0, 'quality': quality_label(txt), 'url': href, 'size': 'N/A'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     return jsonify({'title': title, 'downloads': downloads})
