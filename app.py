@@ -146,7 +146,17 @@ def details():
             for a in pg.find_all('a', href=True):
                 href = a['href']
                 txt  = a.get_text(strip=True)
-                if ('episodes.animeflix.dad' in href and 'getlink' in href):
+                is_dl = (
+                    'animeflix' in href or
+                    'getlink' in href or
+                    'episodes.' in href or
+                    'download' in href.lower() or
+                    'drive.google' in href or
+                    any(x in txt.lower() for x in ['download', 'episode', '480p', '720p', '1080p'])
+                )
+                # Skip nav/social/useless links
+                skip = any(x in href for x in ['#', 'javascript', 'facebook', 'twitter', 'instagram', 'mailto', 'animeflix.dad/category', 'animeflix.dad/tag', 'animeflix.dad/page'])
+                if is_dl and not skip and len(txt) > 1:
                     ep = re.search(r'Episode\s*(\d+)', txt, re.I)
                     downloads.append({'name': txt or 'Unknown', 'episode': int(ep.group(1)) if ep else 0, 'quality': quality_label(txt), 'url': href, 'size': 'N/A'})
     except Exception as e:
