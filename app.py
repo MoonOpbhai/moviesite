@@ -1,5 +1,5 @@
 import re, os
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from flask import Flask, request, jsonify, render_template
 import requests
 from bs4 import BeautifulSoup
@@ -12,7 +12,6 @@ HEADERS = {
     'Referer': 'https://www.google.com/',
 }
 
-# BollyFlix domains - tries each one until one works
 BF_DOMAINS = [
     'https://new.bollyflix.gd',
     'https://bollyflix.show',
@@ -23,6 +22,16 @@ BF_DOMAINS = [
 TMDB_KEY  = os.environ.get('TMDB_API_KEY', '')
 TMDB_BASE = 'https://api.themoviedb.org/3'
 TMDB_IMG  = 'https://image.tmdb.org/t/p'
+
+# Known download hosting domains — sirf inke links real download links hain
+DL_HOSTS = [
+    'drive.google.com', 'mega.nz', 'mediafire.com', 'pixeldrain.com',
+    'send.cm', 'gofile.io', 'uploadhaven.com', 'filedot.to',
+    'buzzheavier.com', 'driveseed.org', 'hubdrive.me', 'filepress.me',
+    'dropbox.com', 'fastdlserver.site', 'gdflix.dad', 'gdflix.pro',
+    'gdflix.in', 'gdtot.men', 'gdtot.cfd', 'drivehub.in',
+    'appdrive.info', 'driveace.in', 'drivebot.eu.org',
+]
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -162,69 +171,92 @@ def tmdb_details_route():
 
 @app.route('/details')
 def details():
-    src = request.args.get('source', '')
     url = request.args.get('url', '')
     if not url:
         return jsonify({'error': 'missing url'}), 400
 
     title     = ''
     downloads = []
+    page_domain = urlparse(url).netloc  # e.g. new.bollyflix.gd
 
     try:
         pg = soup(url)
 
+        # Title
         for sel in ['h1.entry-title', 'h1.post-title', 'h1']:
             el = pg.select_one(sel)
             if el:
                 title = el.get_text(strip=True)
                 break
 
-        for a in pg.find_all('a', href=True):
+        # Sirf main post content ke andar dekhenge
+        content_area = (
+            pg.select_one('.entry-content')
+            or pg.select_one('.post-content')
+            or pg.select_one('article')
+            or pg
+        )
+
+        # Related posts / sidebar / nav hatao content se
+        for junk in content_area.select(
+            '.related-posts, .related, #related-posts, .post-related, '
+            '.yarpp-related, .jp-relatedposts, .sidebar, #sidebar, '
+            '.widget, nav, footer, header, .navigation, .post-navigation'
+        ):
+            junk.decompose()
+
+        for a in content_area.find_all('a', href=True):
             href = a.get('href', '').strip()
             txt  = a.get_text(strip=True)
 
             if not href or href.startswith('#') or 'javascript' in href:
                 continue
 
-            # Skip junk links
-            combined = (href + txt).lower()
-            skip = ['how to', 'howto', 'tutorial', 'facebook', 'twitter',
-                    'instagram', 'telegram', 'whatsapp', 'youtube',
-                    'category/', '/tag/', '/page/', 'mailto:',
-                    'privacy', 'contact', 'about', 'dmca']
-            if any(w in combined for w in skip):
+            # Same-site links skip — yeh navigation/related post links hain
+            link_domain = urlparse(href).netloc
+            if not link_domain or link_domain == page_domain:
                 continue
 
-            # Match download links
-            is_dl = any(x in href for x in [
-                'fastdlserver', 'gdflix', 'gofile', 'drive.google',
-                'mega.nz', 'mediafire', 'pixeldrain', 'send.cm',
-                'uploadhaven', 'filedot', 'buzzheavier', 'driveseed',
-                'hubdrive', 'filepress', 'dropbox.com',
-            ]) or (
-                'download' in txt.lower() and len(txt) > 8 and
-                any(q in txt.lower() for q in ['480p','720p','1080p','2160p','4k','bluray','webrip','web-dl','hdrip'])
-            )
+            # Sirf known download hosts allow karo
+            is_dl = any(host in link_domain for host in DL_HOSTS)
+            if not is_dl:
+                continue
 
-            if is_dl:
-                dl = {
-                    'name':    txt or 'Download',
-                    'url':     href,
-                    'quality': quality_label(txt + href),
-                    'size':    'N/A',
-                }
-                nxt = a.next_sibling
-                if nxt:
-                    st = nxt.get_text(strip=True) if hasattr(nxt, 'get_text') else str(nxt).strip()
-                    st = st.strip('[]()').strip()
-                    if st and len(st) < 20:
-                        dl['size'] = st
-                downloads.append(dl)
+            # Quality detect karo — parent heading se
+            quality = 'N/A'
+
+            # 1. Pehle link ke previous sibling headings check karo
+            prev = a.find_previous(['h2', 'h3', 'h4', 'h5'])
+            if prev:
+                quality = quality_label(prev.get_text())
+
+            # 2. Parent elements mein quality dhundo (max 4 levels up)
+            if quality == 'N/A':
+                level = 0
+                for parent in a.parents:
+                    if level > 4:
+                        break
+                    q = quality_label(parent.get_text()[:200])
+                    if q != 'N/A':
+                        quality = q
+                        break
+                    level += 1
+
+            # 3. Link text ya URL se try karo
+            if quality == 'N/A':
+                quality = quality_label(txt + ' ' + href)
+
+            downloads.append({
+                'name':    txt or 'Download',
+                'url':     href,
+                'quality': quality,
+                'size':    'N/A',
+            })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-    # Deduplicate
+    # Deduplicate by URL
     seen, unique = set(), []
     for d in downloads:
         if d['url'] not in seen:
@@ -241,4 +273,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-
+    
